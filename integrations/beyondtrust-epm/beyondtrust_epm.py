@@ -23,6 +23,7 @@ import os
 import sys
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
+from typing import List, Optional, Union
 
 import requests
 from dotenv import load_dotenv
@@ -235,7 +236,7 @@ class BeyondTrustClient:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _get(self, path: str, params: dict | None = None) -> dict | list:
+    def _get(self, path: str, params: Optional[dict] = None) -> Union[dict, list]:
         url = f"{self._base_url}{self.API_PREFIX}{path}"
         resp = self._session.get(url, params=params, timeout=30)
         if resp.status_code == 401:
@@ -244,7 +245,7 @@ class BeyondTrustClient:
         resp.raise_for_status()
         return resp.json()
 
-    def _paginate(self, path: str, extra_params: dict | None = None) -> list:
+    def _paginate(self, path: str, extra_params: Optional[dict] = None) -> list:
         """Iterate through paginated endpoint, returning all records."""
         records = []
         page = 1
