@@ -23,7 +23,7 @@ import os
 import sys
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import requests
 from dotenv import load_dotenv
@@ -312,7 +312,7 @@ class BeyondTrustClient:
 
 # Map BeyondTrust permission action strings → Veza OAA permission types.
 # Keys are lower-cased substrings of the action field.
-_ACTION_TO_OAA: dict[str, list[OAAPermission]] = {
+_ACTION_TO_OAA: Dict[str, List[OAAPermission]] = {
     "read":          [OAAPermission.DataRead, OAAPermission.MetadataRead],
     "view":          [OAAPermission.DataRead, OAAPermission.MetadataRead],
     "list":          [OAAPermission.DataRead, OAAPermission.MetadataRead],
@@ -328,16 +328,16 @@ _ACTION_TO_OAA: dict[str, list[OAAPermission]] = {
                       OAAPermission.MetadataRead, OAAPermission.MetadataWrite],
     "admin":         [OAAPermission.DataRead, OAAPermission.DataWrite,
                       OAAPermission.MetadataRead, OAAPermission.MetadataWrite,
-                      OAAPermission.NonPrivilegedAccess],
+                      OAAPermission.NonData],
     "full":          [OAAPermission.DataRead, OAAPermission.DataWrite,
                       OAAPermission.MetadataRead, OAAPermission.MetadataWrite,
-                      OAAPermission.NonPrivilegedAccess],
+                      OAAPermission.NonData],
 }
 
 _DEFAULT_OAA_PERMS = [OAAPermission.DataRead, OAAPermission.MetadataRead]
 
 
-def _resolve_oaa_permissions(action: str) -> list[OAAPermission]:
+def _resolve_oaa_permissions(action: str) -> List[OAAPermission]:
     """Return OAA permission list for a BeyondTrust action string."""
     action_lower = action.lower() if action else ""
     for key, perms in _ACTION_TO_OAA.items():
