@@ -44,7 +44,7 @@ die()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 NON_INTERACTIVE=false
 OVERWRITE_ENV=false
 INSTALL_DIR="${DEFAULT_INSTALL_DIR}"
-REPO_URL="${REPO_URL:-https://github.com/your-org/your-repo}"
+REPO_URL="${REPO_URL:-https://github.com/andrewmusto-git/BeyondTrustEPM.git}"
 BRANCH="${BRANCH:-main}"
 
 while [[ $# -gt 0 ]]; do
