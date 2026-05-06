@@ -244,7 +244,13 @@ class BeyondTrustClient:
         url = f"{self._base_url}{self.API_PREFIX}{path}"
         resp = self._session.get(url, params=params, timeout=30)
         if resp.status_code == 401:
-            log.error("HTTP 401 Unauthorized — check client credentials and scope")
+            log.error(
+                "HTTP 401 Unauthorized fetching %s — "
+                "verify the API client in BeyondTrust has 'Users API' access granted.\n"
+                "Response body: %s",
+                url,
+                resp.text[:1000],
+            )
             sys.exit(1)
         resp.raise_for_status()
         return resp.json()
