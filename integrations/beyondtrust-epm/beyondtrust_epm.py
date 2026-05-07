@@ -336,7 +336,7 @@ class BeyondTrustClient:
             log.info("Fetched %d settings", len(settings))
             return settings
         except Exception as exc:
-            log.warning("Could not fetch settings (endpoint may not be available): %s — skipping", exc)
+            log.debug("Settings endpoint not available (404 is expected for some tenants): %s — skipping", exc)
             return []
 
 
@@ -598,7 +598,6 @@ def build_oaa_payload(
         app.add_local_group(
             name=group_name,
             unique_id=group_id,
-            description=group.get("description") or "",
         )
         group_id_map[group_id] = group_name
         log.debug("Added local group: %s", group_name)
