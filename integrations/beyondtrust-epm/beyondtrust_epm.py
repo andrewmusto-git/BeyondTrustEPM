@@ -440,13 +440,14 @@ def build_oaa_payload(
         log.debug("Added role: %s (%s)", role_name, role_id)
 
         # Assign permissions to the role
+        # Note: local_roles is keyed by unique_id (role_id UUID) when unique_id is provided
         allow_perms = role.get("allowPermissions") or []
         perms_added = 0
         for perm in allow_perms:
             action = (perm.get("action") or "").strip()
             if action and action in permission_names:
                 try:
-                    app.local_roles[role_name].add_permission(action)
+                    app.local_roles[role_id].add_permissions([action])
                     perms_added += 1
                 except Exception as exc:
                     log.warning("Could not add permission '%s' to role '%s': %s",
@@ -455,7 +456,7 @@ def build_oaa_payload(
             # Role has no allowPermissions from API — infer a fallback from the role name
             fallback = _infer_fallback_permission(role_name)
             try:
-                app.local_roles[role_name].add_permission(fallback)
+                app.local_roles[role_id].add_permissions([fallback])
                 log.debug("Role '%s' has no allowPermissions — assigned fallback '%s'",
                           role_name, fallback)
             except Exception as exc:
@@ -475,10 +476,11 @@ def build_oaa_payload(
             continue
         # Prefix to distinguish global roles from tenant roles
         display_name = f"[Global] {role_name}"
-        if display_name in app.local_roles:
+        global_unique_id = f"global-{role_id}"
+        if global_unique_id in app.local_roles:
             continue
-        app.add_local_role(display_name, unique_id=f"global-{role_id}")
-        role_id_map[f"global-{role_id}"] = display_name
+        app.add_local_role(display_name, unique_id=global_unique_id)
+        role_id_map[global_unique_id] = display_name
         log.debug("Added global role: %s (%s)", display_name, role_id)
 
         allow_perms = role.get("allowPermissions") or []
@@ -487,7 +489,7 @@ def build_oaa_payload(
             action = (perm.get("action") or "").strip()
             if action and action in permission_names:
                 try:
-                    app.local_roles[display_name].add_permission(action)
+                    app.local_roles[global_unique_id].add_permissions([action])
                     perms_added += 1
                 except Exception as exc:
                     log.warning("Could not add permission '%s' to global role '%s': %s",
@@ -495,7 +497,7 @@ def build_oaa_payload(
         if perms_added == 0:
             fallback = _infer_fallback_permission(role_name)
             try:
-                app.local_roles[display_name].add_permission(fallback)
+                app.local_roles[global_unique_id].add_permissions([fallback])
                 log.debug("Global role '%s' has no allowPermissions — assigned fallback '%s'",
                           display_name, fallback)
             except Exception as exc:
@@ -576,20 +578,23 @@ def build_oaa_payload(
             local_user.set_property("disabled", "true")
 
         # Assign roles to user
+        # Roles are keyed by UUID (unique_id) in app.local_roles — use role_id for lookup
         user_roles = user.get("roles") or []
         for role_item in user_roles:
             role_id = str(role_item.get("id") or "")
             role_name_from_item = (role_item.get("name") or "").strip()
-            # Look up by ID first, then by name
-            oaa_role_name = role_id_map.get(role_id) or role_name_from_item
-            if oaa_role_name and oaa_role_name in app.local_roles:
-                local_user.add_role(oaa_role_name)
-                log.debug("User '%s' → role '%s'", unique_name, oaa_role_name)
-            elif oaa_role_name:
+            # Prefer UUID key (set as unique_id during add_local_role)
+            if role_id and role_id in role_id_map and role_id in app.local_roles:
+                local_user.add_role(role_id)
+                log.debug("User '%s' → role '%s' (%s)", unique_name, role_id_map[role_id], role_id)
+            elif role_name_from_item and role_name_from_item in app.local_roles:
+                local_user.add_role(role_name_from_item)
+                log.debug("User '%s' → role '%s'", unique_name, role_name_from_item)
+            else:
                 log.debug(
                     "User '%s' references unknown role '%s' — skipping",
                     unique_name,
-                    oaa_role_name,
+                    role_name_from_item or role_id,
                 )
 
         users_added += 1
