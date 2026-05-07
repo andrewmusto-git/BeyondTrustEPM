@@ -415,9 +415,6 @@ def build_oaa_payload(
     users: list,
     roles: list,
     global_roles: list,
-    groups: list,
-    policies: list,
-    settings: list,
     provider_name: str,
     datasource_name: str,
 ) -> CustomApplication:
@@ -454,10 +451,6 @@ def build_oaa_payload(
         oaa_perms = _resolve_oaa_permissions(pname)
         app.add_custom_permission(pname, oaa_perms)
         log.debug("Registered custom permission '%s' → %s", pname, oaa_perms)
-
-    # "assigned" is used to link users directly to Policy and Settings resources
-    app.add_custom_permission("assigned", [OAAPermission.NonData])
-    log.debug("Registered custom permission 'assigned' → NonData")
 
     log.info("Registered %d custom permissions", len(permission_names))
 
@@ -547,65 +540,7 @@ def build_oaa_payload(
     log.info("Added %d global roles", global_role_count)
 
     # ------------------------------------------------------------------
-    # 3. Add Policies as OAA Application Resources
-    # ------------------------------------------------------------------
-    policy_resources: Dict[str, object] = {}  # policy_id → CustomResource
-    for policy in policies:
-        policy_id = str(policy.get("id", ""))
-        policy_name = (policy.get("name") or policy_id).strip()
-        if not policy_name:
-            continue
-        resource = app.add_resource(
-            name=policy_name,
-            resource_type="Policy",
-            unique_id=policy_id,
-            description=policy.get("description") or "",
-        )
-        policy_resources[policy_id] = resource
-        log.debug("Added policy resource: %s", policy_name)
-
-    log.info("Added %d policy resources", len(policies))
-
-    # ------------------------------------------------------------------
-    # 3b. Add Settings as OAA Application Resources
-    # ------------------------------------------------------------------
-    settings_resources: Dict[str, object] = {}  # setting_id → CustomResource
-    for setting in settings:
-        setting_id = str(setting.get("id", ""))
-        setting_name = (setting.get("name") or setting_id).strip()
-        if not setting_name:
-            continue
-        resource = app.add_resource(
-            name=setting_name,
-            resource_type="Settings",
-            unique_id=setting_id,
-            description=setting.get("description") or "",
-        )
-        settings_resources[setting_id] = resource
-        log.debug("Added settings resource: %s", setting_name)
-
-    log.info("Added %d settings resources", len(settings_resources))
-
-    # ------------------------------------------------------------------
-    # 4. Add Groups as OAA Local Groups
-    # ------------------------------------------------------------------
-    group_id_map: Dict[str, str] = {}  # group_id → group_name
-    for group in groups:
-        group_id = str(group.get("id", ""))
-        group_name = (group.get("name") or group_id).strip()
-        if not group_name:
-            continue
-        app.add_local_group(
-            name=group_name,
-            unique_id=group_id,
-        )
-        group_id_map[group_id] = group_name
-        log.debug("Added local group: %s", group_name)
-
-    log.info("Added %d computer groups as local groups", len(group_id_map))
-
-    # ------------------------------------------------------------------
-    # 5. Add Users as OAA Local Users + assign roles
+    # 3. Add Users as OAA Local Users + assign roles
     # ------------------------------------------------------------------
     users_added = 0
     for user in users:
@@ -659,51 +594,6 @@ def build_oaa_payload(
                 continue
             local_user.add_role(role_key, apply_to_application=True)
             log.debug("User '%s' → role '%s'", unique_name, role_id_map.get(role_key, role_key))
-
-        # Assign groups (OAA local groups) to user
-        user_groups = user.get("groups") or []
-        for group_item in user_groups:
-            group_item_id = str(group_item.get("id") or "")
-            if group_item_id and group_item_id in group_id_map:
-                local_user.add_groups([group_item_id])
-                log.debug("User '%s' → group '%s'", unique_name, group_id_map[group_item_id])
-            else:
-                group_item_name = (group_item.get("name") or "").strip()
-                log.debug(
-                    "User '%s' references unknown group '%s' — skipping",
-                    unique_name,
-                    group_item_name or group_item_id,
-                )
-
-        # Assign policies to user (resource-level "assigned" permission)
-        user_policies = user.get("policies") or []
-        for policy_item in user_policies:
-            policy_item_id = str(policy_item.get("id") or "")
-            if policy_item_id and policy_item_id in policy_resources:
-                local_user.add_permission("assigned", resources=[policy_resources[policy_item_id]])
-                log.debug("User '%s' → policy '%s'", unique_name, policy_item_id)
-            else:
-                policy_item_name = (policy_item.get("name") or "").strip()
-                log.debug(
-                    "User '%s' references unknown policy '%s' — skipping",
-                    unique_name,
-                    policy_item_name or policy_item_id,
-                )
-
-        # Assign settings to user (resource-level "assigned" permission)
-        user_settings = user.get("settings") or []
-        for settings_item in user_settings:
-            settings_item_id = str(settings_item.get("id") or "")
-            if settings_item_id and settings_item_id in settings_resources:
-                local_user.add_permission("assigned", resources=[settings_resources[settings_item_id]])
-                log.debug("User '%s' → settings '%s'", unique_name, settings_item_id)
-            else:
-                settings_item_name = (settings_item.get("name") or "").strip()
-                log.debug(
-                    "User '%s' references unknown settings '%s' — skipping",
-                    unique_name,
-                    settings_item_name or settings_item_id,
-                )
 
         users_added += 1
 
@@ -809,18 +699,12 @@ def main() -> None:
     users = bt_client.get_users()
     roles = bt_client.get_roles()
     global_roles = bt_client.get_global_roles()
-    groups = bt_client.get_groups()
-    policies = bt_client.get_policies()
-    settings = bt_client.get_settings()
 
     log.info(
-        "Data collected — users: %d, roles: %d, global_roles: %d, groups: %d, policies: %d, settings: %d",
+        "Data collected — users: %d, roles: %d, global_roles: %d",
         len(users),
         len(roles),
         len(global_roles),
-        len(groups),
-        len(policies),
-        len(settings),
     )
 
     # Build OAA payload
@@ -828,9 +712,6 @@ def main() -> None:
         users=users,
         roles=roles,
         global_roles=global_roles,
-        groups=groups,
-        policies=policies,
-        settings=settings,
         provider_name=args.provider_name,
         datasource_name=args.datasource_name,
     )
