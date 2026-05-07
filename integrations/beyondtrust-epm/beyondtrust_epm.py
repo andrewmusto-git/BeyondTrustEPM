@@ -6,15 +6,19 @@ Collects identity and permission data from BeyondTrust PM Cloud and pushes
 to Veza's Open Authorization API (OAA) as a CustomApplication.
 
 Entity model:
-  - BeyondTrust Users   → OAA Local Users
-  - BeyondTrust Roles   → OAA Local Roles
-  - BeyondTrust Policies → OAA Application Resources
-  - Role allowPermissions → OAA Custom Permissions
+  - BeyondTrust Users        → OAA Local Users
+  - BeyondTrust Roles        → OAA Local Roles
+  - BeyondTrust GlobalRoles  → OAA Local Roles (global/system-wide)
+  - BeyondTrust Policies     → OAA Application Resources
+  - Role allowPermissions    → OAA Custom Permissions
 
 Authentication:
   BeyondTrust PM Cloud uses OAuth2 Client Credentials.
   Token endpoint: https://<tenant>.pm.beyondtrustcloud.com/oauth/connect/token
   Scope: urn:management:api
+
+API Version: v3 (management-api/v3)
+  Rate limit: 1000 requests per 100 seconds
 """
 
 import argparse
@@ -188,10 +192,10 @@ def validate_config(config: dict, dry_run: bool) -> None:
 # ---------------------------------------------------------------------------
 
 class BeyondTrustClient:
-    """Thin REST client for BeyondTrust PM Cloud Management API v1."""
+    """Thin REST client for BeyondTrust PM Cloud Management API v3."""
 
     TOKEN_PATH = "/oauth/connect/token"
-    API_PREFIX = "/management-api/v1"
+    API_PREFIX = "/management-api/v3"
     SCOPE = "urn:management:api"
 
     def __init__(self, base_url: str, client_id: str, client_secret: str, page_size: int = 200):
@@ -315,6 +319,13 @@ class BeyondTrustClient:
         log.info("Fetched %d policies", len(policies))
         return policies
 
+    def get_global_roles(self) -> list:
+        """Fetch global/system-wide roles (new in API v3)."""
+        log.info("Fetching global roles …")
+        global_roles = self._paginate("/GlobalRoles")
+        log.info("Fetched %d global roles", len(global_roles))
+        return global_roles
+
 
 # ---------------------------------------------------------------------------
 # OAA payload builder
@@ -359,6 +370,7 @@ def _resolve_oaa_permissions(action: str) -> List[OAAPermission]:
 def build_oaa_payload(
     users: list,
     roles: list,
+    global_roles: list,
     groups: list,
     policies: list,
     provider_name: str,
@@ -373,10 +385,10 @@ def build_oaa_payload(
     )
 
     # ------------------------------------------------------------------
-    # 1. Collect all unique permission action strings from roles
+    # 1. Collect all unique permission action strings from roles + global roles
     # ------------------------------------------------------------------
     permission_names: set[str] = set()
-    for role in roles:
+    for role in list(roles) + list(global_roles):
         for perm in role.get("allowPermissions") or []:
             action = (perm.get("action") or "").strip()
             if action:
@@ -417,6 +429,35 @@ def build_oaa_payload(
                                 action, role_name, exc)
 
     log.info("Added %d roles", len(role_id_map))
+
+    # ------------------------------------------------------------------
+    # 2b. Add GlobalRoles as OAA Local Roles (API v3 only)
+    # ------------------------------------------------------------------
+    global_role_count = 0
+    for role in global_roles:
+        role_id = str(role.get("id", ""))
+        role_name = (role.get("name") or role_id).strip()
+        if not role_name:
+            continue
+        # Prefix to distinguish global roles from tenant roles
+        display_name = f"[Global] {role_name}"
+        if display_name in app.local_roles:
+            continue
+        app.add_local_role(display_name, unique_id=f"global-{role_id}")
+        role_id_map[f"global-{role_id}"] = display_name
+        log.debug("Added global role: %s (%s)", display_name, role_id)
+
+        for perm in role.get("allowPermissions") or []:
+            action = (perm.get("action") or "").strip()
+            if action and action in permission_names:
+                try:
+                    app.local_roles[display_name].add_permission(action)
+                except Exception as exc:
+                    log.warning("Could not add permission '%s' to global role '%s': %s",
+                                action, display_name, exc)
+        global_role_count += 1
+
+    log.info("Added %d global roles", global_role_count)
 
     # ------------------------------------------------------------------
     # 3. Add Policies as OAA Application Resources
@@ -608,13 +649,15 @@ def main() -> None:
     # Collect data
     users = bt_client.get_users()
     roles = bt_client.get_roles()
+    global_roles = bt_client.get_global_roles()
     groups = bt_client.get_groups()
     policies = bt_client.get_policies()
 
     log.info(
-        "Data collected — users: %d, roles: %d, groups: %d, policies: %d",
+        "Data collected — users: %d, roles: %d, global_roles: %d, groups: %d, policies: %d",
         len(users),
         len(roles),
+        len(global_roles),
         len(groups),
         len(policies),
     )
@@ -623,6 +666,7 @@ def main() -> None:
     app = build_oaa_payload(
         users=users,
         roles=roles,
+        global_roles=global_roles,
         groups=groups,
         policies=policies,
         provider_name=args.provider_name,
