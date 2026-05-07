@@ -447,6 +447,7 @@ def build_oaa_payload(
     # 2. Add Roles as OAA Local Roles
     # ------------------------------------------------------------------
     role_id_map: dict[str, str] = {}  # BT role UUID → OAA role name
+    role_name_to_id: dict[str, str] = {}  # lowercase role name → role key in app.local_roles
     for role in roles:
         role_id = str(role.get("id", ""))
         role_name = (role.get("name") or role_id).strip()
@@ -454,6 +455,7 @@ def build_oaa_payload(
             continue
         app.add_local_role(role_name, unique_id=role_id)
         role_id_map[role_id] = role_name
+        role_name_to_id[role_name.lower()] = role_id
         log.debug("Added role: %s (%s)", role_name, role_id)
 
         # Assign permissions to the role
@@ -498,6 +500,8 @@ def build_oaa_payload(
             continue
         app.add_local_role(display_name, unique_id=global_unique_id)
         role_id_map[global_unique_id] = display_name
+        role_name_to_id[role_name.lower()] = global_unique_id
+        role_name_to_id[display_name.lower()] = global_unique_id
         log.debug("Added global role: %s (%s)", display_name, role_id)
 
         allow_perms = role.get("allowPermissions") or []
@@ -597,64 +601,30 @@ def build_oaa_payload(
             local_user.set_property("disabled", "true")
 
         # Assign roles to user
-        # Roles are keyed by UUID (unique_id) in app.local_roles — use role_id for lookup
+        # Try UUID first (roles keyed by unique_id), fall back to name-based lookup.
+        # apply_to_application=True is required so the SDK serialises the assignment
+        # into identity_to_permissions (None/False causes the entry to be skipped).
         user_roles = user.get("roles") or []
         for role_item in user_roles:
-            role_id = str(role_item.get("id") or "")
+            role_item_id = str(role_item.get("id") or "")
             role_name_from_item = (role_item.get("name") or "").strip()
-            # Prefer UUID key (set as unique_id during add_local_role)
-            if role_id and role_id in role_id_map and role_id in app.local_roles:
-                local_user.add_role(role_id)
-                log.debug("User '%s' → role '%s' (%s)", unique_name, role_id_map[role_id], role_id)
-            elif role_name_from_item and role_name_from_item in app.local_roles:
-                local_user.add_role(role_name_from_item)
-                log.debug("User '%s' → role '%s'", unique_name, role_name_from_item)
+            if role_item_id and role_item_id in app.local_roles:
+                role_key = role_item_id
+            elif role_name_from_item and role_name_from_item.lower() in role_name_to_id:
+                role_key = role_name_to_id[role_name_from_item.lower()]
             else:
                 log.debug(
                     "User '%s' references unknown role '%s' — skipping",
                     unique_name,
-                    role_name_from_item or role_id,
+                    role_name_from_item or role_item_id,
                 )
+                continue
+            local_user.add_role(role_key, apply_to_application=True)
+            log.debug("User '%s' → role '%s'", unique_name, role_id_map.get(role_key, role_key))
 
         users_added += 1
 
     log.info("Added %d users", users_added)
-
-    # ------------------------------------------------------------------
-    # 6. Assign role permissions to policy resources
-    #    BeyondTrust EPM management roles apply globally across all policies.
-    #    Linking roles → policies with their effective permission level
-    #    populates the identity_to_permissions field in the OAA payload so
-    #    Veza can compute each user's effective access on each policy.
-    # ------------------------------------------------------------------
-    assigned_count = 0
-    if policy_resources:
-        for role_id, role_name in role_id_map.items():
-            role_obj = app.local_roles.get(role_id)
-            if not role_obj:
-                continue
-            effective_perm = _effective_permission_key(
-                getattr(role_obj, "permissions", []), role_name
-            )
-            for resource in policy_resources.values():
-                try:
-                    resource.add_permission(effective_perm, local_roles=[role_id])
-                    assigned_count += 1
-                except Exception as exc:
-                    log.warning(
-                        "Could not assign permission '%s' on policy resource for role '%s': %s",
-                        effective_perm, role_name, exc,
-                    )
-        log.info(
-            "Assigned %d role-policy permission entries across %d policies and %d roles",
-            assigned_count, len(policy_resources), len(role_id_map),
-        )
-    else:
-        log.warning(
-            "No policy resources found — identity_to_permissions will be empty; "
-            "verify that /Policies returned data from the BeyondTrust API"
-        )
-
     return app
 
 
