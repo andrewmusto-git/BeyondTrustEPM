@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Union
 import requests
 from dotenv import load_dotenv
 from oaaclient.client import OAAClient, OAAClientError
-from oaaclient.templates import CustomApplication, OAAPermission
+from oaaclient.templates import CustomApplication, OAAPermission, OAAPropertyType
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -384,6 +384,13 @@ def build_oaa_payload(
         description="BeyondTrust Privilege Management Cloud — identity and role data",
     )
 
+    # Define custom properties for local users
+    app.property_definitions.define_local_user_property("email_address", OAAPropertyType.STRING)
+    app.property_definitions.define_local_user_property("account_name", OAAPropertyType.STRING)
+    app.property_definitions.define_local_user_property("last_signed_in", OAAPropertyType.STRING)
+    app.property_definitions.define_local_user_property("created", OAAPropertyType.STRING)
+    app.property_definitions.define_local_user_property("disabled", OAAPropertyType.STRING)
+
     # ------------------------------------------------------------------
     # 1. Collect all unique permission action strings from roles + global roles
     # ------------------------------------------------------------------
@@ -517,17 +524,17 @@ def build_oaa_payload(
 
         # Custom properties
         if email:
-            local_user.add_custom_property("email_address", email)
+            local_user.set_property("email_address", email)
         if account_name and email:
-            local_user.add_custom_property("account_name", account_name)
+            local_user.set_property("account_name", account_name)
         last_signed_in = user.get("lastSignedIn")
         if last_signed_in:
-            local_user.add_custom_property("last_signed_in", str(last_signed_in))
+            local_user.set_property("last_signed_in", str(last_signed_in))
         created = user.get("created")
         if created:
-            local_user.add_custom_property("created", str(created))
+            local_user.set_property("created", str(created))
         if user.get("disabled"):
-            local_user.add_custom_property("disabled", "true")
+            local_user.set_property("disabled", "true")
 
         # Assign roles to user
         user_roles = user.get("roles") or []
