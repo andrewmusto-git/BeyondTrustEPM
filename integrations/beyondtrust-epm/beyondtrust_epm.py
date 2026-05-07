@@ -358,6 +358,20 @@ _ACTION_TO_OAA: Dict[str, List[OAAPermission]] = {
 _DEFAULT_OAA_PERMS = [OAAPermission.DataRead, OAAPermission.MetadataRead]
 
 
+def _infer_fallback_permission(role_name: str) -> str:
+    """Return a registered fallback permission key (read/write/admin) inferred from role name.
+
+    Used when a role's allowPermissions list is empty — common for BeyondTrust built-in
+    management roles that do not expose their permission definitions via the API.
+    """
+    name_lower = role_name.lower()
+    if "admin" in name_lower:
+        return "admin"
+    if any(kw in name_lower for kw in ("creator", "write", "update", "modify", "editor")):
+        return "write"
+    return "read"
+
+
 def _resolve_oaa_permissions(action: str) -> List[OAAPermission]:
     """Return OAA permission list for a BeyondTrust action string."""
     action_lower = action.lower() if action else ""
@@ -426,14 +440,27 @@ def build_oaa_payload(
         log.debug("Added role: %s (%s)", role_name, role_id)
 
         # Assign permissions to the role
-        for perm in role.get("allowPermissions") or []:
+        allow_perms = role.get("allowPermissions") or []
+        perms_added = 0
+        for perm in allow_perms:
             action = (perm.get("action") or "").strip()
             if action and action in permission_names:
                 try:
                     app.local_roles[role_name].add_permission(action)
+                    perms_added += 1
                 except Exception as exc:
                     log.warning("Could not add permission '%s' to role '%s': %s",
                                 action, role_name, exc)
+        if perms_added == 0:
+            # Role has no allowPermissions from API — infer a fallback from the role name
+            fallback = _infer_fallback_permission(role_name)
+            try:
+                app.local_roles[role_name].add_permission(fallback)
+                log.debug("Role '%s' has no allowPermissions — assigned fallback '%s'",
+                          role_name, fallback)
+            except Exception as exc:
+                log.warning("Could not add fallback permission '%s' to role '%s': %s",
+                            fallback, role_name, exc)
 
     log.info("Added %d roles", len(role_id_map))
 
@@ -454,14 +481,26 @@ def build_oaa_payload(
         role_id_map[f"global-{role_id}"] = display_name
         log.debug("Added global role: %s (%s)", display_name, role_id)
 
-        for perm in role.get("allowPermissions") or []:
+        allow_perms = role.get("allowPermissions") or []
+        perms_added = 0
+        for perm in allow_perms:
             action = (perm.get("action") or "").strip()
             if action and action in permission_names:
                 try:
                     app.local_roles[display_name].add_permission(action)
+                    perms_added += 1
                 except Exception as exc:
                     log.warning("Could not add permission '%s' to global role '%s': %s",
                                 action, display_name, exc)
+        if perms_added == 0:
+            fallback = _infer_fallback_permission(role_name)
+            try:
+                app.local_roles[display_name].add_permission(fallback)
+                log.debug("Global role '%s' has no allowPermissions — assigned fallback '%s'",
+                          display_name, fallback)
+            except Exception as exc:
+                log.warning("Could not add fallback permission '%s' to global role '%s': %s",
+                            fallback, display_name, exc)
         global_role_count += 1
 
     log.info("Added %d global roles", global_role_count)
