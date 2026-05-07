@@ -372,6 +372,23 @@ def _infer_fallback_permission(role_name: str) -> str:
     return "read"
 
 
+def _effective_permission_key(perm_names: List[str], role_name: str = "") -> str:
+    """Return the highest effective permission key (admin/write/read) from a role's permission list.
+
+    Checks the permission names assigned to the role; falls back to role-name inference
+    if the list is empty or does not match any known keyword.
+    """
+    combined = " ".join(p.lower() for p in perm_names)
+    if "admin" in combined or "full" in combined:
+        return "admin"
+    if any(kw in combined for kw in ("write", "manage", "update", "modify", "create", "delete")):
+        return "write"
+    if combined:
+        return "read"
+    # No permissions recorded — infer from role name
+    return _infer_fallback_permission(role_name)
+
+
 def _resolve_oaa_permissions(action: str) -> List[OAAPermission]:
     """Return OAA permission list for a BeyondTrust action string."""
     action_lower = action.lower() if action else ""
@@ -510,6 +527,7 @@ def build_oaa_payload(
     # ------------------------------------------------------------------
     # 3. Add Policies as OAA Application Resources
     # ------------------------------------------------------------------
+    policy_resources: Dict[str, object] = {}  # policy_id → CustomResource
     for policy in policies:
         policy_id = str(policy.get("id", ""))
         policy_name = (policy.get("name") or policy_id).strip()
@@ -521,6 +539,7 @@ def build_oaa_payload(
             unique_id=policy_id,
             description=policy.get("description") or "",
         )
+        policy_resources[policy_id] = resource
         log.debug("Added policy resource: %s", policy_name)
 
     log.info("Added %d policy resources", len(policies))
@@ -600,6 +619,42 @@ def build_oaa_payload(
         users_added += 1
 
     log.info("Added %d users", users_added)
+
+    # ------------------------------------------------------------------
+    # 6. Assign role permissions to policy resources
+    #    BeyondTrust EPM management roles apply globally across all policies.
+    #    Linking roles → policies with their effective permission level
+    #    populates the identity_to_permissions field in the OAA payload so
+    #    Veza can compute each user's effective access on each policy.
+    # ------------------------------------------------------------------
+    assigned_count = 0
+    if policy_resources:
+        for role_id, role_name in role_id_map.items():
+            role_obj = app.local_roles.get(role_id)
+            if not role_obj:
+                continue
+            effective_perm = _effective_permission_key(
+                getattr(role_obj, "permissions", []), role_name
+            )
+            for resource in policy_resources.values():
+                try:
+                    resource.add_permission(effective_perm, local_roles=[role_id])
+                    assigned_count += 1
+                except Exception as exc:
+                    log.warning(
+                        "Could not assign permission '%s' on policy resource for role '%s': %s",
+                        effective_perm, role_name, exc,
+                    )
+        log.info(
+            "Assigned %d role-policy permission entries across %d policies and %d roles",
+            assigned_count, len(policy_resources), len(role_id_map),
+        )
+    else:
+        log.warning(
+            "No policy resources found — identity_to_permissions will be empty; "
+            "verify that /Policies returned data from the BeyondTrust API"
+        )
+
     return app
 
 
