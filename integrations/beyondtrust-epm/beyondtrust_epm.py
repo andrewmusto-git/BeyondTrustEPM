@@ -543,40 +543,30 @@ def build_oaa_payload(
     log.info("Added %d global roles", global_role_count)
 
     # ------------------------------------------------------------------
-    # 2c. Add Groups as OAA Local Groups
-    # Build two maps:
-    #   group_id_map        : group_id → group_name  (for lookup during user loop)
-    #   user_to_group_ids   : user_id → {group_ids}  (reverse membership from group data)
+    # 2c. Add Groups as OAA Resources
+    # BeyondTrust Groups are computer groups, not user-membership groups.
+    # Users are granted administrative access to groups (view/edit/manage),
+    # so they are modelled as Resources that users hold permissions on.
+    # group_id_map : group_id → group_name (for user-loop lookups)
+    # all_group_names : ordered list of every group name (used for allGroups flag)
     # ------------------------------------------------------------------
     group_id_map: dict[str, str] = {}
-    user_to_group_ids: dict[str, set] = {}
     for group in groups:
         group_id = str(group.get("id", ""))
         group_name = (group.get("name") or group_id).strip()
         if not group_name:
             continue
-        app.add_local_group(group_name, unique_id=group_id)
+        app.add_resource(group_name, resource_type="Group", unique_id=group_id)
         group_id_map[group_id] = group_name
-        log.debug("Added group: %s (%s)", group_name, group_id)
+        log.debug("Added group resource: %s (%s)", group_name, group_id)
 
-        # Build reverse map: if the group object lists its members, record them
-        members = (
-            group.get("users")
-            or group.get("members")
-            or group.get("assignedUsers")
-            or []
-        )
-        for member in members:
-            uid = str(member.get("id") or member.get("userId") or "")
-            if uid:
-                user_to_group_ids.setdefault(uid, set()).add(group_id)
-
-    log.info("Added %d groups", len(group_id_map))
+    all_group_names = list(group_id_map.values())
+    log.info("Added %d group resources", len(group_id_map))
 
     # ------------------------------------------------------------------
-    # 2d. Add Policies as OAA Resources + build assignment maps
+    # 2d. Add Policies as OAA Resources
     # ------------------------------------------------------------------
-    # Register the "assigned" permission used for policy/setting access
+    # Register the "assigned" permission used for group/policy/setting access
     if "assigned" not in permission_names:
         app.add_custom_permission(
             "assigned",
@@ -585,56 +575,34 @@ def build_oaa_payload(
         permission_names.add("assigned")
         log.debug("Registered 'assigned' custom permission")
 
-    # user_id  → {policy_names} from direct assignment
-    user_policy_map: dict[str, set] = {}
-    # group_id → {policy_names} for indirect user→group→policy lookup
-    group_policy_map: dict[str, set] = {}
-
+    policy_id_map: dict[str, str] = {}  # policy_id → policy_name
     for policy in policies:
         policy_id = str(policy.get("id", ""))
         policy_name = (policy.get("name") or policy_id).strip()
         if not policy_name:
             continue
         app.add_resource(policy_name, resource_type="Policy", unique_id=policy_id)
+        policy_id_map[policy_id] = policy_name
         log.debug("Added policy resource: %s (%s)", policy_name, policy_id)
 
-        for u in policy.get("assignedUsers") or policy.get("users") or []:
-            uid = str(u.get("id") or u.get("userId") or "")
-            if uid:
-                user_policy_map.setdefault(uid, set()).add(policy_name)
-
-        for g in policy.get("assignedGroups") or policy.get("groups") or []:
-            gid = str(g.get("id") or g.get("groupId") or "")
-            if gid:
-                group_policy_map.setdefault(gid, set()).add(policy_name)
-
-    log.info("Added %d policy resources", len(policies))
+    all_policy_names = list(policy_id_map.values())
+    log.info("Added %d policy resources", len(policy_id_map))
 
     # ------------------------------------------------------------------
-    # 2e. Add Settings as OAA Resources + build assignment maps
+    # 2e. Add Settings as OAA Resources
     # ------------------------------------------------------------------
-    user_settings_map: dict[str, set] = {}
-    group_settings_map: dict[str, set] = {}
-
+    settings_id_map: dict[str, str] = {}  # setting_id → setting_name
     for setting in settings:
         setting_id = str(setting.get("id", ""))
         setting_name = (setting.get("name") or setting_id).strip()
         if not setting_name:
             continue
         app.add_resource(setting_name, resource_type="Setting", unique_id=setting_id)
+        settings_id_map[setting_id] = setting_name
         log.debug("Added setting resource: %s (%s)", setting_name, setting_id)
 
-        for u in setting.get("assignedUsers") or setting.get("users") or []:
-            uid = str(u.get("id") or u.get("userId") or "")
-            if uid:
-                user_settings_map.setdefault(uid, set()).add(setting_name)
-
-        for g in setting.get("assignedGroups") or setting.get("groups") or []:
-            gid = str(g.get("id") or g.get("groupId") or "")
-            if gid:
-                group_settings_map.setdefault(gid, set()).add(setting_name)
-
-    log.info("Added %d setting resources", len(settings))
+    all_setting_names = list(settings_id_map.values())
+    log.info("Added %d setting resources", len(settings_id_map))
 
     # ------------------------------------------------------------------
     # 3. Add Users as OAA Local Users + assign roles
@@ -693,62 +661,106 @@ def build_oaa_payload(
             log.debug("User '%s' → role '%s'", unique_name, role_id_map.get(role_key, role_key))
 
         # ------------------------------------------------------------------
-        # Assign groups to user
-        # Prefer groups listed directly on the user object; fall back to the
-        # reverse map built from group membership data during section 2c.
+        # Determine whether this user has broad ("all") or scoped access.
+        #
+        # The API user object exposes these flags from the management model:
+        #   admin        – global administrator (implicit access to everything)
+        #   allGroups    – has administrative access to all computer groups
+        #   allPolicies  – has administrative access to all policies
+        #   allSettings  – has administrative access to all settings
+        #
+        # Users with a tenant Role (roles[] is non-empty) are typically
+        # full admins and also get access to all resources.
+        #
+        # For scoped users the API may return per-resource assignments in
+        # nested arrays (groups[], policies[], settings[]); we fall back to
+        # those when the broad flags are absent.
         # ------------------------------------------------------------------
-        effective_group_ids: set[str] = set()
-        inline_groups = (
-            user.get("groups")
-            or user.get("assignedGroups")
-            or []
-        )
-        for group_item in inline_groups:
-            gid = str(group_item.get("id") or group_item.get("groupId") or "")
-            if gid and gid in group_id_map:
-                effective_group_ids.add(gid)
-        # Merge any membership discovered from group-side data
-        effective_group_ids.update(user_to_group_ids.get(user_id, set()))
+        is_admin = user.get("admin", False) or bool(user.get("roles"))
 
-        for gid in effective_group_ids:
+        # ---- Assigned Groups ------------------------------------------------
+        effective_group_names: list[str] = []
+        if is_admin or user.get("allGroups", False):
+            # Broad access: user can manage all computer groups
+            effective_group_names = all_group_names
+        else:
+            # Scoped access: look for specific group assignments in the user obj.
+            # Field candidates: groups, groupPermissions, roleResource[].groups
+            for grp in (
+                user.get("groups")
+                or user.get("groupPermissions")
+                or []
+            ):
+                gid = str(grp.get("id") or grp.get("groupId") or "")
+                gname = group_id_map.get(gid)
+                if gname:
+                    effective_group_names.append(gname)
+
+        for gname in effective_group_names:
             try:
-                local_user.add_group(gid)
-                log.debug("User '%s' → group '%s'", unique_name, group_id_map[gid])
+                local_user.add_permission(
+                    "assigned", resources=[gname], apply_to_application=False
+                )
+                log.debug("User '%s' → group '%s'", unique_name, gname)
             except Exception as exc:
-                log.warning("Could not add group '%s' to user '%s': %s",
-                            group_id_map.get(gid, gid), unique_name, exc)
+                log.warning(
+                    "Could not assign group '%s' to user '%s': %s",
+                    gname, unique_name, exc,
+                )
 
-        # ------------------------------------------------------------------
-        # Assign policies to user (direct + via group membership)
-        # ------------------------------------------------------------------
-        assigned_policies: set[str] = set()
-        assigned_policies.update(user_policy_map.get(user_id, set()))
-        for gid in effective_group_ids:
-            assigned_policies.update(group_policy_map.get(gid, set()))
+        # ---- Assigned Policies ----------------------------------------------
+        effective_policy_names: list[str] = []
+        if is_admin or user.get("allPolicies", False):
+            effective_policy_names = all_policy_names
+        else:
+            for pol in (
+                user.get("policies")
+                or user.get("policyPermissions")
+                or []
+            ):
+                pid = str(pol.get("id") or pol.get("policyId") or "")
+                pname = policy_id_map.get(pid)
+                if pname:
+                    effective_policy_names.append(pname)
 
-        for policy_name in assigned_policies:
+        for pname in effective_policy_names:
             try:
-                local_user.add_permission("assigned", resources=[policy_name], apply_to_application=False)
-                log.debug("User '%s' → policy '%s'", unique_name, policy_name)
+                local_user.add_permission(
+                    "assigned", resources=[pname], apply_to_application=False
+                )
+                log.debug("User '%s' → policy '%s'", unique_name, pname)
             except Exception as exc:
-                log.warning("Could not assign policy '%s' to user '%s': %s",
-                            policy_name, unique_name, exc)
+                log.warning(
+                    "Could not assign policy '%s' to user '%s': %s",
+                    pname, unique_name, exc,
+                )
 
-        # ------------------------------------------------------------------
-        # Assign settings to user (direct + via group membership)
-        # ------------------------------------------------------------------
-        assigned_settings_names: set[str] = set()
-        assigned_settings_names.update(user_settings_map.get(user_id, set()))
-        for gid in effective_group_ids:
-            assigned_settings_names.update(group_settings_map.get(gid, set()))
+        # ---- Assigned Settings ----------------------------------------------
+        effective_setting_names: list[str] = []
+        if is_admin or user.get("allSettings", False):
+            effective_setting_names = all_setting_names
+        else:
+            for sett in (
+                user.get("settings")
+                or user.get("settingsPermissions")
+                or []
+            ):
+                sid = str(sett.get("id") or sett.get("settingId") or "")
+                sname = settings_id_map.get(sid)
+                if sname:
+                    effective_setting_names.append(sname)
 
-        for setting_name in assigned_settings_names:
+        for sname in effective_setting_names:
             try:
-                local_user.add_permission("assigned", resources=[setting_name], apply_to_application=False)
-                log.debug("User '%s' → setting '%s'", unique_name, setting_name)
+                local_user.add_permission(
+                    "assigned", resources=[sname], apply_to_application=False
+                )
+                log.debug("User '%s' → setting '%s'", unique_name, sname)
             except Exception as exc:
-                log.warning("Could not assign setting '%s' to user '%s': %s",
-                            setting_name, unique_name, exc)
+                log.warning(
+                    "Could not assign setting '%s' to user '%s': %s",
+                    sname, unique_name, exc,
+                )
 
         users_added += 1
 
