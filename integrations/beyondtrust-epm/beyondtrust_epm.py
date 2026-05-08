@@ -547,20 +547,23 @@ def build_oaa_payload(
     # BeyondTrust Groups are computer groups, not user-membership groups.
     # Users are granted administrative access to groups (view/edit/manage),
     # so they are modelled as Resources that users hold permissions on.
-    # group_id_map : group_id → group_name (for user-loop lookups)
-    # all_group_names : ordered list of every group name (used for allGroups flag)
+    # group_id_map : group_id → group_name (for debug logging)
+    # group_resource_map : group_id → CustomResource object (for add_permission)
+    # all_group_resources : all CustomResource objects (used for allGroups flag)
     # ------------------------------------------------------------------
     group_id_map: dict[str, str] = {}
+    group_resource_map: dict[str, object] = {}
     for group in groups:
         group_id = str(group.get("id", ""))
         group_name = (group.get("name") or group_id).strip()
         if not group_name:
             continue
-        app.add_resource(group_name, resource_type="Group", unique_id=group_id)
+        group_resource = app.add_resource(group_name, resource_type="Group", unique_id=group_id)
         group_id_map[group_id] = group_name
+        group_resource_map[group_id] = group_resource
         log.debug("Added group resource: %s (%s)", group_name, group_id)
 
-    all_group_names = list(group_id_map.values())
+    all_group_resources = list(group_resource_map.values())
     log.info("Added %d group resources", len(group_id_map))
 
     # ------------------------------------------------------------------
@@ -576,32 +579,36 @@ def build_oaa_payload(
         log.debug("Registered 'assigned' custom permission")
 
     policy_id_map: dict[str, str] = {}  # policy_id → policy_name
+    policy_resource_map: dict[str, object] = {}  # policy_id → CustomResource object
     for policy in policies:
         policy_id = str(policy.get("id", ""))
         policy_name = (policy.get("name") or policy_id).strip()
         if not policy_name:
             continue
-        app.add_resource(policy_name, resource_type="Policy", unique_id=policy_id)
+        policy_resource = app.add_resource(policy_name, resource_type="Policy", unique_id=policy_id)
         policy_id_map[policy_id] = policy_name
+        policy_resource_map[policy_id] = policy_resource
         log.debug("Added policy resource: %s (%s)", policy_name, policy_id)
 
-    all_policy_names = list(policy_id_map.values())
+    all_policy_resources = list(policy_resource_map.values())
     log.info("Added %d policy resources", len(policy_id_map))
 
     # ------------------------------------------------------------------
     # 2e. Add Settings as OAA Resources
     # ------------------------------------------------------------------
     settings_id_map: dict[str, str] = {}  # setting_id → setting_name
+    settings_resource_map: dict[str, object] = {}  # setting_id → CustomResource object
     for setting in settings:
         setting_id = str(setting.get("id", ""))
         setting_name = (setting.get("name") or setting_id).strip()
         if not setting_name:
             continue
-        app.add_resource(setting_name, resource_type="Setting", unique_id=setting_id)
+        setting_resource = app.add_resource(setting_name, resource_type="Setting", unique_id=setting_id)
         settings_id_map[setting_id] = setting_name
+        settings_resource_map[setting_id] = setting_resource
         log.debug("Added setting resource: %s (%s)", setting_name, setting_id)
 
-    all_setting_names = list(settings_id_map.values())
+    all_setting_resources = list(settings_resource_map.values())
     log.info("Added %d setting resources", len(settings_id_map))
 
     # ------------------------------------------------------------------
@@ -679,10 +686,10 @@ def build_oaa_payload(
         is_admin = user.get("admin", False) or bool(user.get("roles"))
 
         # ---- Assigned Groups ------------------------------------------------
-        effective_group_names: list[str] = []
+        effective_group_resources: list[object] = []
         if is_admin or user.get("allGroups", False):
             # Broad access: user can manage all computer groups
-            effective_group_names = all_group_names
+            effective_group_resources = all_group_resources
         else:
             # Scoped access: look for specific group assignments in the user obj.
             # Field candidates: groups, groupPermissions, roleResource[].groups
@@ -692,26 +699,26 @@ def build_oaa_payload(
                 or []
             ):
                 gid = str(grp.get("id") or grp.get("groupId") or "")
-                gname = group_id_map.get(gid)
-                if gname:
-                    effective_group_names.append(gname)
+                gresource = group_resource_map.get(gid)
+                if gresource:
+                    effective_group_resources.append(gresource)
 
-        for gname in effective_group_names:
+        for gresource in effective_group_resources:
             try:
                 local_user.add_permission(
-                    "assigned", resources=[gname], apply_to_application=False
+                    "assigned", resources=[gresource], apply_to_application=False
                 )
-                log.debug("User '%s' → group '%s'", unique_name, gname)
+                log.debug("User '%s' → group '%s'", unique_name, gresource.name)
             except Exception as exc:
                 log.warning(
                     "Could not assign group '%s' to user '%s': %s",
-                    gname, unique_name, exc,
+                    gresource.name, unique_name, exc,
                 )
 
         # ---- Assigned Policies ----------------------------------------------
-        effective_policy_names: list[str] = []
+        effective_policy_resources: list[object] = []
         if is_admin or user.get("allPolicies", False):
-            effective_policy_names = all_policy_names
+            effective_policy_resources = all_policy_resources
         else:
             for pol in (
                 user.get("policies")
@@ -719,26 +726,26 @@ def build_oaa_payload(
                 or []
             ):
                 pid = str(pol.get("id") or pol.get("policyId") or "")
-                pname = policy_id_map.get(pid)
-                if pname:
-                    effective_policy_names.append(pname)
+                presource = policy_resource_map.get(pid)
+                if presource:
+                    effective_policy_resources.append(presource)
 
-        for pname in effective_policy_names:
+        for presource in effective_policy_resources:
             try:
                 local_user.add_permission(
-                    "assigned", resources=[pname], apply_to_application=False
+                    "assigned", resources=[presource], apply_to_application=False
                 )
-                log.debug("User '%s' → policy '%s'", unique_name, pname)
+                log.debug("User '%s' → policy '%s'", unique_name, presource.name)
             except Exception as exc:
                 log.warning(
                     "Could not assign policy '%s' to user '%s': %s",
-                    pname, unique_name, exc,
+                    presource.name, unique_name, exc,
                 )
 
         # ---- Assigned Settings ----------------------------------------------
-        effective_setting_names: list[str] = []
+        effective_setting_resources: list[object] = []
         if is_admin or user.get("allSettings", False):
-            effective_setting_names = all_setting_names
+            effective_setting_resources = all_setting_resources
         else:
             for sett in (
                 user.get("settings")
@@ -746,20 +753,20 @@ def build_oaa_payload(
                 or []
             ):
                 sid = str(sett.get("id") or sett.get("settingId") or "")
-                sname = settings_id_map.get(sid)
-                if sname:
-                    effective_setting_names.append(sname)
+                sresource = settings_resource_map.get(sid)
+                if sresource:
+                    effective_setting_resources.append(sresource)
 
-        for sname in effective_setting_names:
+        for sresource in effective_setting_resources:
             try:
                 local_user.add_permission(
-                    "assigned", resources=[sname], apply_to_application=False
+                    "assigned", resources=[sresource], apply_to_application=False
                 )
-                log.debug("User '%s' → setting '%s'", unique_name, sname)
+                log.debug("User '%s' → setting '%s'", unique_name, sresource.name)
             except Exception as exc:
                 log.warning(
                     "Could not assign setting '%s' to user '%s': %s",
-                    sname, unique_name, exc,
+                    sresource.name, unique_name, exc,
                 )
 
         users_added += 1
