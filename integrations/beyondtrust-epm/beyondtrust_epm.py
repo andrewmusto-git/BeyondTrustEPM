@@ -415,6 +415,9 @@ def build_oaa_payload(
     users: list,
     roles: list,
     global_roles: list,
+    groups: list,
+    policies: list,
+    settings: list,
     provider_name: str,
     datasource_name: str,
 ) -> CustomApplication:
@@ -540,6 +543,100 @@ def build_oaa_payload(
     log.info("Added %d global roles", global_role_count)
 
     # ------------------------------------------------------------------
+    # 2c. Add Groups as OAA Local Groups
+    # Build two maps:
+    #   group_id_map        : group_id → group_name  (for lookup during user loop)
+    #   user_to_group_ids   : user_id → {group_ids}  (reverse membership from group data)
+    # ------------------------------------------------------------------
+    group_id_map: dict[str, str] = {}
+    user_to_group_ids: dict[str, set] = {}
+    for group in groups:
+        group_id = str(group.get("id", ""))
+        group_name = (group.get("name") or group_id).strip()
+        if not group_name:
+            continue
+        app.add_local_group(group_name, unique_id=group_id)
+        group_id_map[group_id] = group_name
+        log.debug("Added group: %s (%s)", group_name, group_id)
+
+        # Build reverse map: if the group object lists its members, record them
+        members = (
+            group.get("users")
+            or group.get("members")
+            or group.get("assignedUsers")
+            or []
+        )
+        for member in members:
+            uid = str(member.get("id") or member.get("userId") or "")
+            if uid:
+                user_to_group_ids.setdefault(uid, set()).add(group_id)
+
+    log.info("Added %d groups", len(group_id_map))
+
+    # ------------------------------------------------------------------
+    # 2d. Add Policies as OAA Resources + build assignment maps
+    # ------------------------------------------------------------------
+    # Register the "assigned" permission used for policy/setting access
+    if "assigned" not in permission_names:
+        app.add_custom_permission(
+            "assigned",
+            [OAAPermission.DataRead, OAAPermission.MetadataRead],
+        )
+        permission_names.add("assigned")
+        log.debug("Registered 'assigned' custom permission")
+
+    # user_id  → {policy_names} from direct assignment
+    user_policy_map: dict[str, set] = {}
+    # group_id → {policy_names} for indirect user→group→policy lookup
+    group_policy_map: dict[str, set] = {}
+
+    for policy in policies:
+        policy_id = str(policy.get("id", ""))
+        policy_name = (policy.get("name") or policy_id).strip()
+        if not policy_name:
+            continue
+        app.add_resource(policy_name, resource_type="Policy", unique_id=policy_id)
+        log.debug("Added policy resource: %s (%s)", policy_name, policy_id)
+
+        for u in policy.get("assignedUsers") or policy.get("users") or []:
+            uid = str(u.get("id") or u.get("userId") or "")
+            if uid:
+                user_policy_map.setdefault(uid, set()).add(policy_name)
+
+        for g in policy.get("assignedGroups") or policy.get("groups") or []:
+            gid = str(g.get("id") or g.get("groupId") or "")
+            if gid:
+                group_policy_map.setdefault(gid, set()).add(policy_name)
+
+    log.info("Added %d policy resources", len(policies))
+
+    # ------------------------------------------------------------------
+    # 2e. Add Settings as OAA Resources + build assignment maps
+    # ------------------------------------------------------------------
+    user_settings_map: dict[str, set] = {}
+    group_settings_map: dict[str, set] = {}
+
+    for setting in settings:
+        setting_id = str(setting.get("id", ""))
+        setting_name = (setting.get("name") or setting_id).strip()
+        if not setting_name:
+            continue
+        app.add_resource(setting_name, resource_type="Setting", unique_id=setting_id)
+        log.debug("Added setting resource: %s (%s)", setting_name, setting_id)
+
+        for u in setting.get("assignedUsers") or setting.get("users") or []:
+            uid = str(u.get("id") or u.get("userId") or "")
+            if uid:
+                user_settings_map.setdefault(uid, set()).add(setting_name)
+
+        for g in setting.get("assignedGroups") or setting.get("groups") or []:
+            gid = str(g.get("id") or g.get("groupId") or "")
+            if gid:
+                group_settings_map.setdefault(gid, set()).add(setting_name)
+
+    log.info("Added %d setting resources", len(settings))
+
+    # ------------------------------------------------------------------
     # 3. Add Users as OAA Local Users + assign roles
     # ------------------------------------------------------------------
     users_added = 0
@@ -594,6 +691,64 @@ def build_oaa_payload(
                 continue
             local_user.add_role(role_key, apply_to_application=True)
             log.debug("User '%s' → role '%s'", unique_name, role_id_map.get(role_key, role_key))
+
+        # ------------------------------------------------------------------
+        # Assign groups to user
+        # Prefer groups listed directly on the user object; fall back to the
+        # reverse map built from group membership data during section 2c.
+        # ------------------------------------------------------------------
+        effective_group_ids: set[str] = set()
+        inline_groups = (
+            user.get("groups")
+            or user.get("assignedGroups")
+            or []
+        )
+        for group_item in inline_groups:
+            gid = str(group_item.get("id") or group_item.get("groupId") or "")
+            if gid and gid in group_id_map:
+                effective_group_ids.add(gid)
+        # Merge any membership discovered from group-side data
+        effective_group_ids.update(user_to_group_ids.get(user_id, set()))
+
+        for gid in effective_group_ids:
+            try:
+                local_user.add_group(gid)
+                log.debug("User '%s' → group '%s'", unique_name, group_id_map[gid])
+            except Exception as exc:
+                log.warning("Could not add group '%s' to user '%s': %s",
+                            group_id_map.get(gid, gid), unique_name, exc)
+
+        # ------------------------------------------------------------------
+        # Assign policies to user (direct + via group membership)
+        # ------------------------------------------------------------------
+        assigned_policies: set[str] = set()
+        assigned_policies.update(user_policy_map.get(user_id, set()))
+        for gid in effective_group_ids:
+            assigned_policies.update(group_policy_map.get(gid, set()))
+
+        for policy_name in assigned_policies:
+            try:
+                local_user.add_permission("assigned", resources=[policy_name], apply_to_application=False)
+                log.debug("User '%s' → policy '%s'", unique_name, policy_name)
+            except Exception as exc:
+                log.warning("Could not assign policy '%s' to user '%s': %s",
+                            policy_name, unique_name, exc)
+
+        # ------------------------------------------------------------------
+        # Assign settings to user (direct + via group membership)
+        # ------------------------------------------------------------------
+        assigned_settings_names: set[str] = set()
+        assigned_settings_names.update(user_settings_map.get(user_id, set()))
+        for gid in effective_group_ids:
+            assigned_settings_names.update(group_settings_map.get(gid, set()))
+
+        for setting_name in assigned_settings_names:
+            try:
+                local_user.add_permission("assigned", resources=[setting_name], apply_to_application=False)
+                log.debug("User '%s' → setting '%s'", unique_name, setting_name)
+            except Exception as exc:
+                log.warning("Could not assign setting '%s' to user '%s': %s",
+                            setting_name, unique_name, exc)
 
         users_added += 1
 
@@ -699,12 +854,19 @@ def main() -> None:
     users = bt_client.get_users()
     roles = bt_client.get_roles()
     global_roles = bt_client.get_global_roles()
+    groups = bt_client.get_groups()
+    policies = bt_client.get_policies()
+    settings = bt_client.get_settings()
 
     log.info(
-        "Data collected — users: %d, roles: %d, global_roles: %d",
+        "Data collected — users: %d, roles: %d, global_roles: %d, "
+        "groups: %d, policies: %d, settings: %d",
         len(users),
         len(roles),
         len(global_roles),
+        len(groups),
+        len(policies),
+        len(settings),
     )
 
     # Build OAA payload
@@ -712,6 +874,9 @@ def main() -> None:
         users=users,
         roles=roles,
         global_roles=global_roles,
+        groups=groups,
+        policies=policies,
+        settings=settings,
         provider_name=args.provider_name,
         datasource_name=args.datasource_name,
     )
